@@ -1,44 +1,48 @@
 # pi0Notifyarr
 
-Lightweight Python monitoring and Telegram notification suite designed for the Raspberry Pi Zero W.
+Zero-dependency Python infrastructure and service monitor with Telegram notifications, optimized for the Raspberry Pi Zero W.
 
 ## Features
-- **Arr Monitor (`main.py`):** Polls Sonarr and Radarr APIs for newly grabbed releases and sends HTML-formatted alerts via Telegram.
-- **Infrastructure & Port Monitor (`pinger.py`):** Monitors host availability via ICMP ping and TCP service ports via sockets, sending Telegram alerts on state changes (`ONLINE`/`OFFLINE` and `UP`/`DOWN`) with configurable retry checks.
 
-## Installation
+- **Zero External Dependencies:** Uses only the Python 3 standard library (`urllib`, `socket`, `ssl`, `subprocess`) for minimal RAM and CPU usage (~12 MB RAM).
+- **ICMP Host Monitoring:** Checks device availability via `ping` with configurable retry attempts before alerting.
+- **HTTP/HTTPS & TCP Port Monitoring:** Supports full HTTP/HTTPS URLs (including self-signed certificates on internal domains like `.intern`) as well as raw `IP:Port` TCP socket checks.
+- **Telegram Alerts:** Sends HTML-escaped status change alerts (`ONLINE`/`OFFLINE` and `UP`/`DOWN`) via the Telegram Bot API.
 
-1. Clone the repository:
+## Installation & Setup
+
+1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/Matt4C6F656872/pi0Notifyarr.git](https://github.com/Matt4C6F656872/pi0Notifyarr.git)
+   git clone https://github.com/Matt4C6F656872/pi0Notifyarr.git
    cd pi0Notifyarr
+   ```
 
-Create a virtual environment and install dependencies:
-    Bash
+2. **Create and configure your `.env` file:**
+   ```bash
+   cp .env.example .env
+   chmod 600 .env
+   nano .env
+   ```
 
-    python3 -m venv venv
-    ./venv/bin/pip install -r requirements.txt
+3. **Run with Python 3:**
+   ```bash
+   /usr/bin/python3 pinger.py
+   ```
 
-    Copy .env.example to .env and fill in your credentials and targets:
-    Bash
+## Configuration
 
-    cp .env.example .env
-    nano .env
+Edit `.env` to configure your credentials, check intervals, and monitoring targets:
 
-Configuration Format (.env)
+```dotenv
+TELEGRAM_TOKEN=123456789:ABCDEF_your_bot_token_here
+TELEGRAM_CHAT_ID=987654321
 
-    PING_TARGETS: Comma-separated list formatted as Name(IP_or_Hostname).
+# Check interval in seconds
+PING_INTERVAL=60
 
-        Example: Router(192.168.178.1),Server(192.168.178.10)
+# Host monitoring via ICMP Ping: Name(IP_or_Hostname)
+PING_TARGETS=Router(192.168.178.1),NAS(192.168.178.20)
 
-    SERVICE_TARGETS: Comma-separated list formatted as Name|IP_or_Hostname:Port.
-
-        Example: Plex|192.168.178.10:32400,Sonarr|192.168.178.10:8989
-
-Usage
-
-Run either script directly using the virtual environment:
-Bash
-
-./venv/bin/python pinger.py
-./venv/bin/python main.py
+# Service monitoring via HTTP/HTTPS URL or TCP IP:Port
+SERVICE_TARGETS=Sonarr|http://192.168.178.20:8989/ping,Jellyfin|https://jellyfin.intern,SSH-NAS|192.168.178.20:22
+```
