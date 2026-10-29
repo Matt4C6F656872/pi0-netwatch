@@ -11,6 +11,18 @@ Zero-dependency Python infrastructure and service monitor with Telegram notifica
 
 ## Installation & Setup
 
+### Quick Install (Recommended)
+
+Run this single command on your Raspberry Pi to install, interactively configure `.env`, and register the systemd service:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Matt4C6F656872/pi0-netwatch/main/install.sh | bash
+```
+
+---
+
+### Manual Installation
+
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/Matt4C6F656872/pi0-netwatch.git
@@ -28,6 +40,21 @@ Zero-dependency Python infrastructure and service monitor with Telegram notifica
    ```bash
    /usr/bin/python3 pinger.py
    ```
+
+### Systemd Service Management
+
+If installed via `install.sh` (or running as a service):
+
+```bash
+# Check service status
+sudo systemctl status pi0-netwatch.service
+
+# View live logs
+journalctl -u pi0-netwatch.service -f
+
+# Restart service
+sudo systemctl restart pi0-netwatch.service
+```
 
 ## Configuration
 
