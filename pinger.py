@@ -6,10 +6,9 @@ import html
 import socket
 import subprocess
 import logging
-import requests
-from dotenv import load_dotenv
-
-load_dotenv()
+import urllib.request
+import urllib.parse
+import urllib.error
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,28 +19,37 @@ logging.basicConfig(
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2
 
+def load_env_file(filepath=".env"):
+    """Reads a .env file into os.environ without external libraries."""
+    if not os.path.exists(filepath):
+        return
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ.setdefault(key.strip(), val.strip().strip("'\""))
+
 class TelegramNotifier:
     def __init__(self, token, chat_id):
         self.api_url = f"https://api.telegram.org/bot{token}/sendMessage"
         self.chat_id = chat_id
-        self.session = requests.Session()
 
     def send(self, title, message):
         safe_title = html.escape(str(title))
         safe_message = html.escape(str(message))
-        text = f"<b>{safe_title}</b>\n{safe_message}"
+        payload = urllib.parse.urlencode({
+            "chat_id": self.chat_id,
+            "text": f"<b>{safe_title}</b>\n{safe_message}",
+            "parse_mode": "HTML"
+        }).encode("utf-8")
+
+        req = urllib.request.Request(self.api_url, data=payload, method="POST")
         try:
-            r = self.session.post(
-                self.api_url,
-                data={
-                    "chat_id": self.chat_id,
-                    "text": text,
-                    "parse_mode": "HTML"
-                },
-                timeout=10
-            )
-            r.raise_for_status()
-        except requests.RequestException as e:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    logging.info(f"Telegram sent: {title}")
+        except urllib.error.URLError as e:
             logging.error(f"Telegram Fehler: {e}")
 
 class PingMonitor:
@@ -130,10 +138,11 @@ class ServiceMonitor:
         return "\n".join(changes) if changes else None
 
 def main():
+    load_env_file()
     token = os.getenv('TELEGRAM_TOKEN')
     chat_id = os.getenv('TELEGRAM_CHAT_ID')
     if not token or not chat_id:
-        logging.error("TELEGRAM_TOKEN or TELEGRAM_CHAT_ID missing in .env")
+        logging.error("TELEGRAM_TOKEN or TELEGRAM_CHAT_ID missing in environment or .env")
         return
 
     notifier = TelegramNotifier(token, chat_id)
