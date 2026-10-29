@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import os
 import time
+import html
 import socket
 import subprocess
 import logging
@@ -16,20 +17,31 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# KONFIGURATION: Wie viele Versuche bevor Alarm geschlagen wird?
-MAX_RETRIES = 3 
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 2
 
 class TelegramNotifier:
     def __init__(self, token, chat_id):
         self.api_url = f"https://api.telegram.org/bot{token}/sendMessage"
         self.chat_id = chat_id
+        self.session = requests.Session()
 
     def send(self, title, message):
-        text = f"<b>{title}</b>\n{message}"
+        safe_title = html.escape(str(title))
+        safe_message = html.escape(str(message))
+        text = f"<b>{safe_title}</b>\n{safe_message}"
         try:
-            r = requests.post(self.api_url, data={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
+            r = self.session.post(
+                self.api_url,
+                data={
+                    "chat_id": self.chat_id,
+                    "text": text,
+                    "parse_mode": "HTML"
+                },
+                timeout=10
+            )
             r.raise_for_status()
-        except Exception as e:
+        except requests.RequestException as e:
             logging.error(f"Telegram Fehler: {e}")
 
 class PingMonitor:
@@ -38,29 +50,39 @@ class PingMonitor:
         if targets_string:
             for item in targets_string.split(','):
                 item = item.strip()
-                name = item.split('(')[0] if '(' in item else item
-                ip = item.split('(')[1].replace(')', '') if '(' in item else item
-                self.targets.append({'name': name, 'ip': ip, 'status': True}) # Startet als Online
+                if not item:
+                    continue
+                if '(' in item and item.endswith(')'):
+                    name, ip = item[:-1].split('(', 1)
+                else:
+                    name, ip = item, item
+                self.targets.append({
+                    'name': name.strip(),
+                    'ip': ip.strip(),
+                    'status': True
+                })
 
     def check(self):
         changes = []
         for t in self.targets:
-            # DOPPELCHECK LOGIK:
             is_alive = False
             for i in range(MAX_RETRIES):
-                # Wir pingen; wenn einer von drei Pings durchkommt, ist das Gerät "Up"
-                res = subprocess.run(['ping', '-c', '1', '-W', '2', t['ip']], stdout=subprocess.DEVNULL).returncode == 0
+                res = subprocess.run(
+                    ['ping', '-c', '1', '-W', '2', t['ip']],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                ).returncode == 0
                 if res:
                     is_alive = True
                     break
                 if i < MAX_RETRIES - 1:
-                    time.sleep(120) # Kurz warten vor dem nächsten Versuch
+                    time.sleep(RETRY_DELAY_SECONDS)
 
             if t['status'] != is_alive:
                 t['status'] = is_alive
                 icon = "✅ ONLINE" if is_alive else "🚨 OFFLINE"
                 changes.append(f"{icon}: {t['name']} ({t['ip']})")
-        
+
         return "\n".join(changes) if changes else None
 
 class ServiceMonitor:
@@ -68,26 +90,37 @@ class ServiceMonitor:
         self.services = []
         if targets_string:
             for item in targets_string.split(','):
+                item = item.strip()
+                if not item:
+                    continue
                 try:
-                    name, addr = item.split('|')
-                    ip, port = addr.split(':')
-                    self.services.append({'name': name.strip(), 'ip': ip.strip(), 'port': int(port), 'status': True})
-                except: continue
+                    name, addr = item.split('|', 1)
+                    ip, port = addr.rsplit(':', 1)
+                    self.services.append({
+                        'name': name.strip(),
+                        'ip': ip.strip(),
+                        'port': int(port),
+                        'status': True
+                    })
+                except ValueError:
+                    logging.warning(f"Invalid SERVICE_TARGETS entry skipped: {item}")
 
     def check(self):
         changes = []
         for s in self.services:
             is_up = False
             for i in range(MAX_RETRIES):
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(3)
-                result = sock.connect_ex((s['ip'], s['port']))
-                sock.close()
-                if result == 0:
-                    is_up = True
-                    break
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                        sock.settimeout(3)
+                        if sock.connect_ex((s['ip'], s['port'])) == 0:
+                            is_up = True
+                            break
+                except OSError as e:
+                    logging.debug(f"Socket error for {s['name']}: {e}")
+
                 if i < MAX_RETRIES - 1:
-                    time.sleep(2)
+                    time.sleep(RETRY_DELAY_SECONDS)
 
             if s['status'] != is_up:
                 s['status'] = is_up
@@ -97,7 +130,13 @@ class ServiceMonitor:
         return "\n".join(changes) if changes else None
 
 def main():
-    notifier = TelegramNotifier(os.getenv('TELEGRAM_TOKEN'), os.getenv('TELEGRAM_CHAT_ID'))
+    token = os.getenv('TELEGRAM_TOKEN')
+    chat_id = os.getenv('TELEGRAM_CHAT_ID')
+    if not token or not chat_id:
+        logging.error("TELEGRAM_TOKEN or TELEGRAM_CHAT_ID missing in .env")
+        return
+
+    notifier = TelegramNotifier(token, chat_id)
     ping_mon = PingMonitor(os.getenv('PING_TARGETS'))
     serv_mon = ServiceMonitor(os.getenv('SERVICE_TARGETS'))
     interval = int(os.getenv('PING_INTERVAL', 60))
@@ -107,14 +146,16 @@ def main():
     while True:
         try:
             p_report = ping_mon.check()
-            if p_report: notifier.send("⚠️ Infrastruktur Alarm", p_report)
+            if p_report:
+                notifier.send("⚠️ Infrastruktur Alarm", p_report)
 
             s_report = serv_mon.check()
-            if s_report: notifier.send("⚠️ Service Status Alarm", s_report)
-                
+            if s_report:
+                notifier.send("⚠️ Service Status Alarm", s_report)
+
         except Exception as e:
             logging.error(f"Loop Fehler: {e}")
-        
+
         time.sleep(interval)
 
 if __name__ == "__main__":

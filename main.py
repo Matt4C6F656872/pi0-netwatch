@@ -2,14 +2,13 @@
 # -*- coding: utf-8 -*-
 import os
 import time
-import requests
+import html
 import logging
+import requests
 from dotenv import load_dotenv
 
-# Konfiguration laden
 load_dotenv()
 
-# Logging Setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -20,84 +19,100 @@ class TelegramNotifier:
     def __init__(self, token, chat_id):
         self.api_url = f"https://api.telegram.org/bot{token}/sendMessage"
         self.chat_id = chat_id
+        self.session = requests.Session()
 
     def send(self, title, message):
-        text = f"<b>{title}</b>\n{message}"
+        safe_title = html.escape(str(title))
+        safe_message = html.escape(str(message))
+        text = f"<b>{safe_title}</b>\n{safe_message}"
         try:
-            # Timeout 10s set
-            r = requests.post(self.api_url, data={
-                "chat_id": self.chat_id,
-                "text": text,
-                "parse_mode": "HTML"
-            }, timeout=10)
+            r = self.session.post(
+                self.api_url,
+                data={
+                    "chat_id": self.chat_id,
+                    "text": text,
+                    "parse_mode": "HTML"
+                },
+                timeout=10
+            )
             r.raise_for_status()
             logging.info(f"Telegram sent: {title}")
-        except Exception as e:
+        except requests.RequestException as e:
             logging.error(f"Telegram Error: {e}")
 
 class ArrClient:
     def __init__(self, name, base_url, api_key):
         self.name = name
-        self.base_url = base_url.rstrip('/')
-        self.headers = {'X-Api-Key': api_key}
-        self.last_grab_id = None 
+        self.base_url = (base_url or "").rstrip('/')
+        self.session = requests.Session()
+        self.session.headers.update({'X-Api-Key': api_key or ""})
+        self.last_grab_id = None
 
     def check_new_downloads(self):
         url = f"{self.base_url}/api/v3/history"
-        # eventType entfernt, pageSize auf 20
         params = {
-            'page': 1, 
-            'pageSize': 20, 
-            'sortKey': 'date', 
+            'page': 1,
+            'pageSize': 20,
+            'sortKey': 'date',
             'sortDir': 'desc'
         }
 
         try:
-            r = requests.get(url, headers=self.headers, params=params, timeout=10)
+            r = self.session.get(url, params=params, timeout=10)
             r.raise_for_status()
-            data = r.json()
+            records = r.json().get('records', [])
 
-            # Filter local: Find newest record with eventType 'grabbed'
-            latest_grab_record = None
-            for record in data.get('records', []):
-                if record.get('eventType') == 'grabbed':
-                    latest_grab_record = record
-                    break 
+            grab_records = [rec for rec in records if rec.get('eventType') == 'grabbed']
+            if not grab_records:
+                return []
 
-            if not latest_grab_record:
-                return None 
+            newest_id = grab_records[0]['id']
 
-            grab_id = latest_grab_record['id']
-            title = latest_grab_record.get('sourceTitle', 'Unknown Title')
-
-            # Initial run: just store ID
+            # Initial run: store the latest ID without sending notifications
             if self.last_grab_id is None:
-                self.last_grab_id = grab_id
-                logging.info(f"{self.name} initialized. Last ID: {grab_id}")
-                return None
+                self.last_grab_id = newest_id
+                logging.info(f"{self.name} initialized. Last ID: {newest_id}")
+                return []
 
-            # Check for new ID
-            if grab_id != self.last_grab_id:
-                if grab_id > self.last_grab_id:
-                    self.last_grab_id = grab_id
-                    return title
-            
-            return None
+            # Collect all grabs newer than last_grab_id, ordered oldest to newest
+            new_titles = [
+                rec.get('sourceTitle', 'Unknown Title')
+                for rec in reversed(grab_records)
+                if rec['id'] > self.last_grab_id
+            ]
 
-        except Exception as e:
-            logging.error(f"Error in loop {self.name}: {e}")
-            return None
+            if newest_id > self.last_grab_id:
+                self.last_grab_id = newest_id
+
+            return new_titles
+
+        except requests.RequestException as e:
+            logging.error(f"Network error in {self.name}: {e}")
+            return []
+        except ValueError as e:
+            logging.error(f"JSON decode error in {self.name}: {e}")
+            return []
 
 def main():
-    notifier = TelegramNotifier(
-        os.getenv('TELEGRAM_TOKEN'), 
-        os.getenv('TELEGRAM_CHAT_ID')
-    )
-    
-    clients = [
-        ArrClient("Sonarr", os.getenv('SONARR_URL'), os.getenv('SONARR_API_KEY')),
-        ArrClient("Radarr", os.getenv('RADARR_URL'), os.getenv('RADARR_API_KEY'))
-    ]
+    token = os.getenv('TELEGRAM_TOKEN')
+    chat_id = os.getenv('TELEGRAM_CHAT_ID')
+    if not token or not chat_id:
+        logging.error("TELEGRAM_TOKEN or TELEGRAM_CHAT_ID missing in .env")
+        return
+
+    notifier = TelegramNotifier(token, chat_id)
+
+    clients = []
+    for name, url_env, key_env in [
+        ("Sonarr", "SONARR_URL", "SONARR_API_KEY"),
+        ("Radarr", "RADARR_URL", "RADARR_API_KEY")
+    ]:
+        url = os.getenv(url_env)
+        key = os.getenv(key_env)
+        if url and key:
+            clients.append(ArrClient(name, url, key))
+        else:
+            logging.warning(f"{name} skipped: missing {url_env} or {key_env}")
 
     interval = int(os.getenv('CHECK_INTERVAL', 300))
     logging.info(f"Service started. Interval: {interval}s")
@@ -105,12 +120,12 @@ def main():
     while True:
         for client in clients:
             try:
-                new_title = client.check_new_downloads()
-                if new_title:
-                    notifier.send(f"New Download ({client.name})", new_title)
+                new_titles = client.check_new_downloads()
+                for title in new_titles:
+                    notifier.send(f"New Download ({client.name})", title)
             except Exception as e:
                 logging.error(f"Main Loop Error {client.name}: {e}")
-        
+
         time.sleep(interval)
 
 if __name__ == "__main__":
