@@ -1,4 +1,4 @@
-# pi0Notifyarr
+# pi0-netwatch
 
 Zero-dependency Python infrastructure and service monitor with Telegram notifications, optimized for the Raspberry Pi Zero W.
 
