@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
+import ssl
 import time
 import html
 import socket
@@ -96,44 +97,84 @@ class PingMonitor:
 class ServiceMonitor:
     def __init__(self, targets_string):
         self.services = []
+        # Allow self-signed certificates for internal (.intern) domains
+        self.ssl_ctx = ssl.create_default_context()
+        self.ssl_ctx.check_hostname = False
+        self.ssl_ctx.verify_mode = ssl.CERT_NONE
+
         if targets_string:
             for item in targets_string.split(','):
                 item = item.strip()
                 if not item:
                     continue
-                try:
-                    name, addr = item.split('|', 1)
-                    ip, port = addr.rsplit(':', 1)
+                if '|' not in item:
+                    logging.warning(f"Invalid SERVICE_TARGETS entry skipped: {item}")
+                    continue
+
+                name, target = item.split('|', 1)
+                name = name.strip()
+                target = target.strip()
+
+                if target.startswith(('http://', 'https://')):
                     self.services.append({
-                        'name': name.strip(),
-                        'ip': ip.strip(),
-                        'port': int(port),
+                        'name': name,
+                        'type': 'http',
+                        'target': target,
                         'status': True
                     })
-                except ValueError:
+                elif ':' in target:
+                    try:
+                        ip, port = target.rsplit(':', 1)
+                        self.services.append({
+                            'name': name,
+                            'type': 'tcp',
+                            'ip': ip.strip(),
+                            'port': int(port),
+                            'target': target,
+                            'status': True
+                        })
+                    except ValueError:
+                        logging.warning(f"Invalid TCP SERVICE_TARGETS entry skipped: {item}")
+                else:
                     logging.warning(f"Invalid SERVICE_TARGETS entry skipped: {item}")
+
+    def _probe(self, service):
+        if service['type'] == 'http':
+            req = urllib.request.Request(
+                service['target'],
+                headers={'User-Agent': 'pi0Notifyarr/1.0'}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5, context=self.ssl_ctx) as resp:
+                    return resp.status < 500
+            except urllib.error.HTTPError as e:
+                # 401/403/404 means the server is online and responding; 5xx means service/proxy failure
+                return e.code < 500
+            except Exception:
+                return False
+        else:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(3)
+                    return sock.connect_ex((service['ip'], service['port'])) == 0
+            except OSError:
+                return False
 
     def check(self):
         changes = []
         for s in self.services:
             is_up = False
             for i in range(MAX_RETRIES):
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                        sock.settimeout(3)
-                        if sock.connect_ex((s['ip'], s['port'])) == 0:
-                            is_up = True
-                            break
-                except OSError as e:
-                    logging.debug(f"Socket error for {s['name']}: {e}")
-
+                if self._probe(s):
+                    is_up = True
+                    break
                 if i < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY_SECONDS)
 
             if s['status'] != is_up:
                 s['status'] = is_up
                 icon = "🟢 UP" if is_up else "🔴 DOWN"
-                changes.append(f"{icon}: {s['name']} ({s['port']})")
+                changes.append(f"{icon}: {s['name']} ({s['target']})")
 
         return "\n".join(changes) if changes else None
 
@@ -150,7 +191,10 @@ def main():
     serv_mon = ServiceMonitor(os.getenv('SERVICE_TARGETS'))
     interval = int(os.getenv('PING_INTERVAL', 60))
 
-    logging.info(f"Pinger mit Doppelcheck gestartet (Retries: {MAX_RETRIES})")
+    logging.info(
+        f"Pinger gestartet: {len(ping_mon.targets)} Ping-Ziele, "
+        f"{len(serv_mon.services)} Service-Ziele (Retries: {MAX_RETRIES})"
+    )
 
     while True:
         try:
