@@ -13,8 +13,8 @@ Zero-dependency Python infrastructure and service monitor with Telegram notifica
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/Matt4C6F656872/pi0Notifyarr.git
-   cd pi0Notifyarr
+   git clone https://github.com/Matt4C6F656872/pi0-netwatch.git
+   cd pi0-netwatch
    ```
 
 2. **Create and configure your `.env` file:**
