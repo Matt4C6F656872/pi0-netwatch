@@ -17,6 +17,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
+# Retry configuration to mitigate false positives from transient network jitter or packet loss
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2
 
@@ -75,6 +76,8 @@ class PingMonitor:
         changes = []
         for t in self.targets:
             is_alive = False
+            # Retry logic: Ping target up to MAX_RETRIES times with a brief delay.
+            # Avoids false offline alerts caused by transient packet loss or network hiccups.
             for i in range(MAX_RETRIES):
                 res = subprocess.run(
                     ['ping', '-c', '1', '-W', '2', t['ip']],
@@ -97,7 +100,12 @@ class PingMonitor:
 class ServiceMonitor:
     def __init__(self, targets_string):
         self.services = []
-        # Allow self-signed certificates for internal (.intern) domains
+        # Self-signed certificate handling:
+        # Internal / homelab services often use private CAs or self-signed certificates
+        # (e.g. .intern, .local, .lan, custom internal domains, or raw LAN IP addresses).
+        # Disabling certificate and hostname verification prevents SSL verification
+        # errors from falsely marking HTTPS services as down.
+        # This applies globally to all HTTPS targets regardless of domain name or TLD.
         self.ssl_ctx = ssl.create_default_context()
         self.ssl_ctx.check_hostname = False
         self.ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -145,12 +153,19 @@ class ServiceMonitor:
                 headers={'User-Agent': 'pi0Notifyarr/1.0'}
             )
             try:
+                # Use unverified ssl_ctx to permit self-signed certs on any domain or IP (.intern, .local, raw LAN IP, etc.)
                 with urllib.request.urlopen(req, timeout=5, context=self.ssl_ctx) as resp:
+                    # Status code checks:
+                    # Any response status < 500 (2xx Success, 3xx Redirects) means the service is reachable
                     return resp.status < 500
             except urllib.error.HTTPError as e:
-                # 401/403/404 means the server is online and responding; 5xx means service/proxy failure
+                # Status code checks:
+                # 4xx client errors (e.g. 401 Unauthorized, 403 Forbidden, 404 Not Found)
+                # indicate the web server daemon is running and actively processing requests.
+                # Only 5xx server errors (e.g. 500, 502 Bad Gateway, 503) indicate service failure.
                 return e.code < 500
             except Exception:
+                # Connection refused, network timeout, DNS resolution failure, etc.
                 return False
         else:
             try:
@@ -164,6 +179,9 @@ class ServiceMonitor:
         changes = []
         for s in self.services:
             is_up = False
+            # Retry logic: Probe the service endpoint up to MAX_RETRIES times.
+            # Consecutive failures prevent transient timeouts or momentary service restarts
+            # from generating spurious outage notifications.
             for i in range(MAX_RETRIES):
                 if self._probe(s):
                     is_up = True
